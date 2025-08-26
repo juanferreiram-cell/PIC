@@ -1287,7 +1287,7 @@ void waitForRelease() {
 void setup() {
   SPI.begin();
   tft.begin();
-  tft.setRotation(0);              // Retrato: 240x320
+  tft.setRotation(3);              // Retrato: 240x320
   tft.fillScreen(ILI9341_WHITE);
 
   ts.begin();
