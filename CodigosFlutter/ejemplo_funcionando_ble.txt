@@ -1,0 +1,114 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+void main() {
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const MaterialApp(home: BleTestScreen());
+  }
+}
+
+class BleTestScreen extends StatefulWidget {
+  const BleTestScreen({super.key});
+  @override
+  State<BleTestScreen> createState() => _BleTestScreenState();
+}
+
+class _BleTestScreenState extends State<BleTestScreen> {
+  final flutterReactiveBle = FlutterReactiveBle();
+
+  final Uuid serviceUuid = Uuid.parse("0000ffe0-0000-1000-8000-00805f9b34fb");
+  final Uuid characteristicUuid = Uuid.parse("0000ffe1-0000-1000-8000-00805f9b34fb");
+  final String deviceName = "ESP32_NimBLE"; // nombre que configuraste en ESP32
+
+  DiscoveredDevice? targetDevice;
+  QualifiedCharacteristic? targetCharacteristic;
+  bool isConnected = false;
+
+  @override
+  void initState() {
+    super.initState();
+    requestPermissions();
+  }
+
+  Future<void> requestPermissions() async {
+    await [
+      Permission.bluetooth,
+      Permission.bluetoothConnect,
+      Permission.bluetoothScan,
+      Permission.location
+    ].request();
+
+    startScan();
+  }
+
+  void startScan() {
+    flutterReactiveBle.scanForDevices(withServices: []).listen((device) {
+      if (device.name == deviceName) {
+        setState(() => targetDevice = device);
+        connectToDevice();
+      }
+    });
+  }
+
+  void connectToDevice() {
+    if (targetDevice == null) return;
+    flutterReactiveBle
+        .connectToDevice(
+          id: targetDevice!.id,
+          servicesWithCharacteristicsToDiscover: {serviceUuid: [characteristicUuid]},
+        )
+        .listen((connectionState) {
+      if (connectionState.connectionState == DeviceConnectionState.connected) {
+        setState(() => isConnected = true);
+        targetCharacteristic = QualifiedCharacteristic(
+          serviceId: serviceUuid,
+          characteristicId: characteristicUuid,
+          deviceId: targetDevice!.id,
+        );
+        print("✅ Conectado al ESP32");
+      }
+    }, onError: (e) {
+      print("❌ Error conectando: $e");
+    });
+  }
+
+  Future<void> sendCommand(int value) async {
+    if (!isConnected || targetCharacteristic == null) return;
+    await flutterReactiveBle.writeCharacteristicWithResponse(
+      targetCharacteristic!,
+      value: [value],
+    );
+    print("📤 Comando enviado: $value");
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("BLE → ESP32")),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(isConnected ? "🔗 Conectado" : "⏳ Buscando ESP32..."),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: isConnected ? () => sendCommand(0x01) : null,
+              child: const Text("Encender LED"),
+            ),
+            ElevatedButton(
+              onPressed: isConnected ? () => sendCommand(0x02) : null,
+              child: const Text("Apagar LED"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
