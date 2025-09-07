@@ -1,17 +1,14 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-void main() {
-  runApp(const MyApp());
-}
+void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
   @override
-  Widget build(BuildContext context) {
-    return const MaterialApp(home: BleTestScreen());
-  }
+  Widget build(BuildContext context) => const MaterialApp(home: BleTestScreen());
 }
 
 class BleTestScreen extends StatefulWidget {
@@ -21,90 +18,160 @@ class BleTestScreen extends StatefulWidget {
 }
 
 class _BleTestScreenState extends State<BleTestScreen> {
-  final flutterReactiveBle = FlutterReactiveBle();
+  final _ble = FlutterReactiveBle();
 
   final Uuid serviceUuid = Uuid.parse("0000ffe0-0000-1000-8000-00805f9b34fb");
-  final Uuid characteristicUuid = Uuid.parse("0000ffe1-0000-1000-8000-00805f9b34fb");
-  final String deviceName = "ESP32_NimBLE"; // nombre que configuraste en ESP32
+  final Uuid characteristicUuid =
+      Uuid.parse("0000ffe1-0000-1000-8000-00805f9b34fb");
+  final String expectedName = "ESP32_NimBLE"; // opcional: para mostrar en UI
 
   DiscoveredDevice? targetDevice;
-  QualifiedCharacteristic? targetCharacteristic;
+  QualifiedCharacteristic? targetChar;
   bool isConnected = false;
+
+  StreamSubscription<DiscoveredDevice>? _scanSub;
+  StreamSubscription<ConnectionStateUpdate>? _connSub;
 
   @override
   void initState() {
     super.initState();
-    requestPermissions();
+    _requestPermissions().then((_) => _startScan());
   }
 
-  Future<void> requestPermissions() async {
+  @override
+  void dispose() {
+    _scanSub?.cancel();
+    _connSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _requestPermissions() async {
+    // Android 12+: BLUETOOTH_SCAN / CONNECT; en versiones anteriores, ubicación.
     await [
-      Permission.bluetooth,
-      Permission.bluetoothConnect,
       Permission.bluetoothScan,
-      Permission.location
+      Permission.bluetoothConnect,
+      Permission.location,
     ].request();
-
-    startScan();
   }
 
-  void startScan() {
-    flutterReactiveBle.scanForDevices(withServices: []).listen((device) {
-      if (device.name == deviceName) {
-        setState(() => targetDevice = device);
-        connectToDevice();
-      }
-    });
+  void _startScan() {
+    _scanSub?.cancel();
+
+    // Opción A (recomendada): filtrar por servicio → menos ruido/energía
+    _scanSub = _ble.scanForDevices(withServices: [serviceUuid]).listen((d) {
+      debugPrint(
+          "SCAN(UUID) -> name='${d.name}' id=${d.id} rssi=${d.rssi} uuids=${d.serviceUuids}");
+
+      // Con filtro por servicio, todo lo que llega ya tiene FFE0.
+      // Aceptamos el primero; si querés seleccionar por nombre, podés chequear d.name.
+      targetDevice = d;
+      _scanSub?.cancel();
+      _connectToDevice();
+    }, onError: (e) => debugPrint("Scan error: $e"));
+
+    // --- Opción B (debug): ver TODO y decidir en código ---
+    // _scanSub = _ble.scanForDevices(withServices: []).listen((d) {
+    //   debugPrint(
+    //       "SCAN -> name='${d.name}' id=${d.id} rssi=${d.rssi} uuids=${d.serviceUuids}");
+    //   final matchesUuid = d.serviceUuids.contains(serviceUuid);
+    //   final matchesName = d.name == expectedName && d.name.isNotEmpty;
+    //   if (matchesUuid || matchesName) {
+    //     targetDevice = d;
+    //     _scanSub?.cancel();
+    //     _connectToDevice();
+    //   }
+    // }, onError: (e) => debugPrint("Scan error: $e"));
   }
 
-  void connectToDevice() {
-    if (targetDevice == null) return;
-    flutterReactiveBle
+  void _connectToDevice() {
+    final dev = targetDevice;
+    if (dev == null) return;
+
+    _connSub?.cancel();
+    _connSub = _ble
         .connectToDevice(
-          id: targetDevice!.id,
-          servicesWithCharacteristicsToDiscover: {serviceUuid: [characteristicUuid]},
+          id: dev.id,
+          servicesWithCharacteristicsToDiscover: {
+            serviceUuid: [characteristicUuid],
+          },
+          connectionTimeout: const Duration(seconds: 10),
         )
-        .listen((connectionState) {
-      if (connectionState.connectionState == DeviceConnectionState.connected) {
-        setState(() => isConnected = true);
-        targetCharacteristic = QualifiedCharacteristic(
-          serviceId: serviceUuid,
-          characteristicId: characteristicUuid,
-          deviceId: targetDevice!.id,
-        );
-        print("✅ Conectado al ESP32");
+        .listen((update) {
+      switch (update.connectionState) {
+        case DeviceConnectionState.connected:
+          setState(() => isConnected = true);
+          targetChar = QualifiedCharacteristic(
+            serviceId: serviceUuid,
+            characteristicId: characteristicUuid,
+            deviceId: dev.id,
+          );
+          debugPrint("✅ Conectado a '${dev.name.isEmpty ? "(sin nombre)" : dev.name}' (${dev.id})");
+          break;
+        case DeviceConnectionState.disconnected:
+          setState(() => isConnected = false);
+          debugPrint("ℹ️ Desconectado. Reintentando scan…");
+          _startScan();
+          break;
+        default:
+          // connecting / disconnecting
+          break;
       }
     }, onError: (e) {
-      print("❌ Error conectando: $e");
+      debugPrint("❌ Error de conexión: $e");
+      setState(() => isConnected = false);
+      _startScan();
     });
   }
 
-  Future<void> sendCommand(int value) async {
-    if (!isConnected || targetCharacteristic == null) return;
-    await flutterReactiveBle.writeCharacteristicWithResponse(
-      targetCharacteristic!,
-      value: [value],
-    );
-    print("📤 Comando enviado: $value");
+  Future<void> _sendCommand(int value) async {
+    if (!isConnected || targetChar == null) return;
+    try {
+      // Si tu característica en ESP32 tiene WRITE (con respuesta):
+      await _ble.writeCharacteristicWithResponse(targetChar!, value: [value]);
+
+      // Si además agregaste WRITE_NR en el ESP32 y preferís sin respuesta:
+      // await _ble.writeCharacteristicWithoutResponse(targetChar!, value: [value]);
+
+      debugPrint("📤 Enviado: 0x${value.toRadixString(16).padLeft(2, '0')}");
+    } catch (e) {
+      debugPrint("❌ Error escribiendo: $e");
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final nameShown = targetDevice?.name.isNotEmpty == true
+        ? targetDevice!.name
+        : expectedName; // etiqueta amigable
+
     return Scaffold(
       appBar: AppBar(title: const Text("BLE → ESP32")),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(isConnected ? "🔗 Conectado" : "⏳ Buscando ESP32..."),
+            Text(isConnected
+                ? "🔗 Conectado a ${nameShown}"
+                : "⏳ Buscando ${expectedName}…"),
             const SizedBox(height: 20),
             ElevatedButton(
-              onPressed: isConnected ? () => sendCommand(0x01) : null,
-              child: const Text("Encender LED"),
+              onPressed: isConnected ? () => _sendCommand(0x01) : null,
+              child: const Text("Encender LED (0x01)"),
             ),
             ElevatedButton(
-              onPressed: isConnected ? () => sendCommand(0x02) : null,
-              child: const Text("Apagar LED"),
+              onPressed: isConnected ? () => _sendCommand(0x02) : null,
+              child: const Text("Apagar LED (0x02)"),
+            ),
+            const SizedBox(height: 12),
+            ElevatedButton(
+              onPressed: isConnected ? () => _sendCommand(0x03) : null,
+              child: const Text("Reiniciar ESP32 (0x03)"),
+            ),
+            const SizedBox(height: 32),
+            Text(
+              "Tip: el nombre puede tardar en aparecer; filtrar por UUID es más fiable.",
+              style: Theme.of(context).textTheme.bodySmall,
+              textAlign: TextAlign.center,
             ),
           ],
         ),
