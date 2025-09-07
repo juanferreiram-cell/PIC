@@ -1,0 +1,98 @@
+#include <Arduino.h>
+#include <NimBLEDevice.h>
+
+#define LED_PIN 5
+
+#define SERVICE_UUID        "0000ffe0-0000-1000-8000-00805f9b34fb"
+#define CHARACTERISTIC_UUID "0000ffe1-0000-1000-8000-00805f9b34fb"
+
+NimBLECharacteristic* pCharacteristic;
+const char* deviceName = "ESP32_NimBLE";
+
+void procesarComando(uint8_t comando) {
+  Serial.print("Comando recibido: 0x");
+  Serial.println(comando, HEX);
+
+  switch (comando) {
+    case 0x01:
+      Serial.println("🔴 Encendiendo LED");
+      digitalWrite(LED_PIN, HIGH);
+      break;
+    case 0x02:
+      Serial.println("⚪ Apagando LED");
+      digitalWrite(LED_PIN, LOW);
+      break;
+    case 0x03:
+      Serial.println("🔁 Reiniciando sistema...");
+      delay(500);
+      ESP.restart();
+      break;
+    default:
+      Serial.println("❌ Comando no reconocido");
+      break;
+  }
+}
+
+class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
+  // Si tu versión no soporta esta firma, usa:
+  //   void onWrite(NimBLECharacteristic* pChar) override
+  void onWrite(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
+    std::string value = pChar->getValue();
+    if (!value.empty()) {
+      uint8_t cmd = static_cast<uint8_t>(value[0]);
+      procesarComando(cmd);
+    } else {
+      Serial.println("⚠️ Escritura vacía");
+    }
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);  // estado inicial
+
+  // Fija el nombre GAP
+  NimBLEDevice::init(deviceName);
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9); // opcional: +9 dBm
+
+  NimBLEServer* pServer = NimBLEDevice::createServer();
+  NimBLEService* pService = pServer->createService(SERVICE_UUID);
+
+  pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+  );
+  pCharacteristic->setCallbacks(new CharacteristicCallbacks());
+
+  pService->start();
+
+  // --- Advertising y Scan Response manuales ---
+  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+
+  // Paquete de ADVERTISING: flags + UUID del servicio (para que quepa el nombre en el SR)
+  NimBLEAdvertisementData advData;
+  advData.setFlags(0x06); // LE General Discoverable + BR/EDR not supported
+  advData.setCompleteServices(NimBLEUUID(SERVICE_UUID)); // anuncia FFE0
+  pAdvertising->setAdvertisementData(advData);
+
+  // Paquete de SCAN RESPONSE: aquí va el NOMBRE
+  NimBLEAdvertisementData scanData;
+  scanData.setName(deviceName); // <- nombre visible para Flutter / nRF Connect
+  pAdvertising->setScanResponseData(scanData);
+
+  // (Opcional) intervalos de advertising
+  pAdvertising->setMinInterval(0x20);  // ~20 ms
+  pAdvertising->setMaxInterval(0x40);  // ~40 ms
+
+  // Inicia advertising infinito
+  pAdvertising->start();
+
+  Serial.println("🔷 NimBLE listo y anunciando.");
+  Serial.print("🔗 Nombre (scan response): ");
+  Serial.println(deviceName);
+}
+
+void loop() {
+  delay(1000);
+}
